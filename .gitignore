@@ -1,0 +1,16 @@
+# ambienti virtuali (ognuno ha il suo, creato dallo script di avvio)
+venv/
+venv-win/
+
+# database personale: viene creato automaticamente al primo avvio
+data.json
+
+# varie
+__pycache__/
+*.pyc
+server.log
+.DS_Store
+
+# registrazioni / file pesanti non necessari
+*.mov
+*.mp4
