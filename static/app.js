@@ -60,7 +60,9 @@ const F = (col, k) => SCHEMA[col].find(f => f.k === k);
 
 let DB = null;
 const view = document.getElementById("view");
-const state = { assetsView: "board", stocksView: "board", primaryView: "gallery", secondaryView: "table", ratetoolsView: "table" };
+const lsGet = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+const state = { theme: lsGet("cotTheme", "dark"), bubble: lsGet("cotBubble", "m"), tint: lsGet("cotTint", "on"), side: lsGet("sideHidden", "0") === "1" ? "hidden" : "shown", assetsView: "board", stocksView: "board", primaryView: "gallery", secondaryView: "table", ratetoolsView: "table" };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const tag = v => v ? `<span class="tag c-${COLORS[v] || "gray"}">${esc(v)}</span>` : "";
@@ -166,7 +168,7 @@ function table(col, rows, { preset = {}, fields } = {}) {
     wireInline(root);
   });
   const body = rows.length
-    ? rows.map(r => `<tr data-id="${r.id}">${fs.map(f => `<td class="${f.k === "desc" ? "desc" : ""} ${f.k === "skew" ? "skewcell" : ""}">${cell(col, f, r)}</td>`).join("")}</tr>`).join("")
+    ? rows.map(r => `<tr data-id="${r.id}"${col === "assets" && r.bias ? ` class="tint c-${COLORS[r.bias] || "gray"}"` : ""}>${fs.map(f => `<td class="${f.k === "desc" ? "desc" : ""} ${f.k === "skew" ? "skewcell" : ""}">${cell(col, f, r)}</td>`).join("")}</tr>`).join("")
     : `<tr><td class="empty" colspan="${fs.length}">Nessun elemento — aggiungine uno</td></tr>`;
   return `<div class="tbl-wrap" id="${id}"><table><thead><tr>${fs.map(f => `<th>${f.short || f.l}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>
     <div class="tfoot"><button class="add" data-add style="width:100%">+ Nuova pagina</button></div></div>`;
@@ -213,7 +215,64 @@ function section({ eyebrow, title, desc, controls = "", body }) {
     <div class="sec-head"><div><h2>${title}</h2>${desc ? `<p class="sec-desc">${desc}</p>` : ""}</div><div class="tools">${controls}</div></div>${body}</section>`;
 }
 
-const assetCard = a => `<div class="card" draggable="true" data-id="${a.id}">
+/* Mappa degli asset: bolle trascinabili, colore = bias nel database */
+const BUBBLE_PX = { s: 44, m: 62, l: 84 };
+function defaultPos(a, all) {
+  const bi = BIAS.indexOf(a.bias), grp = all.filter(x => x.bias === a.bias), i = grp.indexOf(a), n = grp.length;
+  const cols = Math.ceil(n / 4), per = Math.ceil(n / cols), c = Math.floor(i / per), r = i % per, rows = Math.min(per, n - c * per);
+  const bx = bi < 0 ? 50 : [12, 31, 50, 69, 88][bi];
+  return { x: bx + (c - (cols - 1) / 2) * 13, y: 50 + (r - (rows - 1) / 2) * 21 };
+}
+function bubbleMap(assets) {
+  const id = uid("m"), px = BUBBLE_PX[state.bubble] || BUBBLE_PX.m;
+  queueMicrotask(() => {
+    const root = document.getElementById(id); if (!root) return;
+    const plot = root.querySelector(".plot");
+    const rb = view.querySelector("[data-reset]"); if (rb) rb.onclick = async () => {
+      for (const a of assets) { delete a.mx; delete a.my; await api("PUT", `assets/${a.id}`, { mx: null, my: null }); }
+      await rerender();
+    };
+    root.querySelectorAll(".bub").forEach(el => {
+      el.ondragstart = e => e.preventDefault();
+      el.onpointerdown = e => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const sx = e.clientX, sy = e.clientY; let moved = false;
+        try { el.setPointerCapture(e.pointerId); } catch (_) {}
+        el.classList.add("hold");
+        const move = ev => {
+          if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 4) return;
+          moved = true;
+          const r = plot.getBoundingClientRect();
+          const x = Math.max(0, Math.min(100, (ev.clientX - r.left) / r.width * 100));
+          const y = Math.max(0, Math.min(100, (ev.clientY - r.top) / r.height * 100));
+          el.style.left = x + "%"; el.style.top = y + "%"; el.dataset.x = x; el.dataset.y = y;
+        };
+        const up = async () => {
+          window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up);
+          el.classList.remove("hold");
+          const item = DB.assets.find(x => x.id === el.dataset.id);
+          if (!moved) return openForm("assets", item);
+          item.mx = +(+el.dataset.x).toFixed(1); item.my = +(+el.dataset.y).toFixed(1);
+          await api("PUT", `assets/${item.id}`, { mx: item.mx, my: item.my });
+        };
+        window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
+      };
+    });
+  });
+  return `<div class="map" id="${id}"><div class="map-in"><div class="ylab">Forza ↑ &nbsp;/&nbsp; Debolezza ↓</div>
+    <div class="plot" style="--bub:${px}px">
+      <i class="axis ax-x"></i><i class="axis ax-y"></i>
+      <span class="q q-tl">Forte</span><span class="q q-tr">Molto forte</span><span class="q q-bl">Molto short</span><span class="q q-br">Short</span>
+      <span class="q q-t">Bilanciato</span><span class="q q-b">Bilanciato</span>
+      ${assets.map(a => { const p = a.mx != null && a.my != null ? { x: a.mx, y: a.my } : defaultPos(a, assets);
+        return `<div class="bub c-${COLORS[a.bias] || "gray"}" data-id="${a.id}" style="left:${p.x}%;top:${p.y}%" title="${esc(a.name)} — ${esc(a.bias || "n/d")}">
+          <span class="be">${esc(a.emoji)}</span><span class="bn">${esc(a.name.replace(/\s*\(.*\)/, ""))}</span></div>`; }).join("")}
+    </div></div>
+    <div class="xlab">Debolezza ← &nbsp;/&nbsp; → Forza</div></div>`;
+}
+
+const assetCard = a => `<div class="card tint c-${COLORS[a.bias] || "gray"}" draggable="true" data-id="${a.id}">
   <div class="t"><span>${esc(a.emoji)}</span><span>${esc(a.name)}</span><span class="grow"></span>${tag(a.cat)}</div>
   <div class="kv"><span>Long term</span>${tag(a.longTerm)}</div>
   <div class="kv"><span>Net position change</span>${tag(a.netChange)}</div>
@@ -258,6 +317,9 @@ const PAGES = {
     </div>
     <div class="dist">${BIAS.map(b => { const n = a.filter(x => x.bias === b).length; return n ? `<i class="c-${COLORS[b]}" style="flex:${n}" title="${b}: ${n}"></i>` : ""; }).join("")}</div>
     <div class="legend">${BIAS.map(b => `<span class="c-${COLORS[b]}">${b} · ${a.filter(x => x.bias === b).length}</span>`).join("")}</div>
+    ${section({ eyebrow: "COT Overview", title: "Mappa degli Asset",
+      desc: "Il colore di ogni bolla segue il bias nell'Asset Database. Trascina le bolle dove vuoi, clicca per modificare l'asset.",
+      controls: `<button class="btn" data-reset>Reimposta posizioni</button>`, body: bubbleMap(a) })}
     ${section({ eyebrow: "COT Analysis", title: "Asset Database",
       desc: state.assetsView === "board" ? "Trascina un asset su un'altra colonna per cambiarne il bias. Clicca sulla skew per riscriverla." : "Clicca sulla skew per riscriverla, su una riga per modificare l'asset.",
       controls: seg("assetsView", [["board", "Board per Bias"], ["table", "Tabella"]]) + `<button class="btn primary" data-new="assets">Nuova</button>`, body: assetsBody })}
@@ -319,10 +381,34 @@ const PAGES = {
       controls: seg("ratetoolsView", [["gallery", "Gallery"], ["table", "Tabella"]]) + newBtn("rates"), body: block("rates", "ratetoolsView") })}`;
   },
 };
+PAGES.settings = () => `
+  <div class="callout"><div class="ic">⚙️</div><div><b>Impostazioni generali</b><p>Le preferenze sono salvate in questo browser.</p></div></div>
+  <div class="set-card">
+    <div class="set-row"><div><b>Tema</b><p>Scuro, chiaro o in base al sistema.</p></div>${seg("theme", [["dark", "Scuro"], ["light", "Chiaro"], ["auto", "Auto"]])}</div>
+    <div class="set-row"><div><b>Colora le schede degli asset</b><p>Le schede prendono il colore del bias in cui si trovano.</p></div>${seg("tint", [["on", "Sì"], ["off", "No"]])}</div>
+    <div class="set-row"><div><b>Grandezza bolle</b><p>Dimensione delle bolle nella Mappa degli Asset.</p></div>${seg("bubble", [["s", "Piccole"], ["m", "Medie"], ["l", "Grandi"]])}</div>
+    <div class="set-row"><div><b>Menu laterale</b><p>Mostra o nascondi il menu a sinistra.</p></div>${seg("side", [["shown", "Visibile"], ["hidden", "Nascosto"]])}</div>
+  </div>`;
 const META = {
   home: ["COT Report Hub", "COT Report Hub"], agriculture: ["Agriculture — COT Commercials", "Agriculture"],
   stocks: ["Stock Picking", "Stock Picking"], tools: ["Tools — Risorse COT", "Tools"],
+  settings: ["Impostazioni", "Impostazioni"],
 };
+
+/* ---------- Settings ---------- */
+function applyTheme() {
+  let t = state.theme;
+  if (t === "auto") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+}
+function applySetting(k, v) {
+  if (k === "theme") { lsSet("cotTheme", v); applyTheme(); }
+  if (k === "bubble") lsSet("cotBubble", v);
+  if (k === "tint") { lsSet("cotTint", v); document.body.classList.toggle("no-tint", v === "off"); }
+  if (k === "side") { lsSet("sideHidden", v === "hidden" ? "1" : "0"); document.querySelector(".app").classList.toggle("side-hidden", v === "hidden"); }
+}
+document.body.classList.toggle("no-tint", state.tint === "off");
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { if (state.theme === "auto") applyTheme(); });
 
 /* ---------- Router ---------- */
 function route() { const m = location.hash.match(/#\/(\w+)/); return m && m[1] in PAGES ? m[1] : "home"; }
@@ -339,9 +425,22 @@ async function rerender() {
   const bx = [...view.querySelectorAll(".board")].map(b => b.scrollLeft);
   view.innerHTML = PAGES[r]();
   view.querySelectorAll(".board").forEach((b, i) => b.scrollLeft = bx[i] || 0);
-  view.querySelectorAll("[data-seg]").forEach(b => b.onclick = () => { const [k, v] = b.dataset.seg.split(":"); state[k] = v; rerender(); });
+  view.querySelectorAll("[data-seg]").forEach(b => b.onclick = () => { const [k, v] = b.dataset.seg.split(":"); state[k] = v; applySetting(k, v); rerender(); });
   view.querySelectorAll("[data-new]").forEach(b => b.onclick = () => openForm(b.dataset.new, null, b.dataset.preset ? JSON.parse(b.dataset.preset) : {}));
   window.scrollTo(0, y);
 }
 window.addEventListener("hashchange", () => { window.scrollTo(0, 0); rerender(); });
 rerender();
+
+/* ---------- Sidebar toggle ---------- */
+(function () {
+  const app = document.querySelector(".app");
+  const set = hidden => {
+    app.classList.toggle("side-hidden", hidden);
+    try { localStorage.setItem("sideHidden", hidden ? "1" : "0"); } catch (e) {}
+    state.side = hidden ? "hidden" : "shown";
+    if (route() === "settings") rerender();
+  };
+  try { if (localStorage.getItem("sideHidden") === "1") app.classList.add("side-hidden"); } catch (e) {}
+  document.querySelectorAll("[data-side-toggle]").forEach(b => b.onclick = () => set(!app.classList.contains("side-hidden")));
+})();
