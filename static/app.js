@@ -13,6 +13,7 @@ const COLORS = {
   "Favorevole": "green", "Neutra": "yellow", "Contraria": "red",
   "Watchlist": "blue", "Attivo": "green", "Chiuso": "gray",
 };
+const SECTORS = ["Tecnologia", "Servizi di comunicazione", "Salute", "Finanza", "Beni di consumo ciclici", "Beni di consumo di base", "Industria", "Energia", "Materiali", "Immobiliare", "Servizi di pubblica utilità"];
 const STOCK_STATUS = ["Watchlist", "Attivo", "Chiuso"];
 const TOOL_CATS = ["COT", "Sentiment", "Forex", "Stagionalità", "Bitcoin", "On-Chain", "Multi-CB", "RBA", "ECB"];
 
@@ -44,10 +45,9 @@ const SCHEMA = {
   ],
   stocks: [
     { k: "ticker", l: "Ticker", t: "text", title: 1 }, { k: "company", l: "Azienda", t: "text" },
-    { k: "sector", l: "Settore", t: "text" },
+    { k: "sector", l: "Settore", t: "select", o: SECTORS },
     { k: "direction", l: "Direzione", t: "select", o: ["Long", "Short"] },
     { k: "status", l: "Stato", t: "select", o: STOCK_STATUS },
-    { k: "entry", l: "Entry", t: "text" }, { k: "target", l: "Target", t: "text" }, { k: "stop", l: "Stop", t: "text" },
     { k: "thesis", l: "Tesi / note", t: "textarea" },
   ],
   tools: [
@@ -86,7 +86,7 @@ function openForm(col, item, preset = {}) {
   const fields = SCHEMA[col].filter(f => !f.virtual).map(f => {
     const v = data[f.k] ?? "";
     let input;
-    if (f.t === "select") input = `<select name="${f.k}"><option value=""></option>${f.o.map(o => `<option ${o === v ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
+    if (f.t === "select") input = `<select name="${f.k}"><option value=""></option>${(v && !f.o.includes(v) ? [...f.o, v] : f.o).map(o => `<option ${o === v ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
     else if (f.t === "textarea") input = `<textarea name="${f.k}" rows="5">${esc(v)}</textarea>`;
     else if (f.t === "number") input = `<input name="${f.k}" type="number" min="0" max="100" step="any" value="${esc(v)}">`;
     else input = `<input name="${f.k}" value="${esc(v)}" autocomplete="off">`;
@@ -232,29 +232,72 @@ function bubbleMap(assets) {
       for (const a of assets) { delete a.mx; delete a.my; await api("PUT", `assets/${a.id}`, { mx: null, my: null }); }
       await rerender();
     };
+    const GAP = 3;
+    /* tiene ogni bolla dentro i bordi (solo visivo: non tocca le posizioni salvate) */
+    const fit = () => {
+      const W = plot.clientWidth, H = plot.clientHeight; if (!W || !H) return;
+      plot.querySelectorAll(".bub:not(.hold)").forEach(n => {
+        const r = n.offsetWidth / 2, x = Math.max(r, Math.min(W - r, n.offsetLeft)), y = Math.max(r, Math.min(H - r, n.offsetTop));
+        if (Math.abs(x - n.offsetLeft) > 0.5) n.style.left = x / W * 100 + "%";
+        if (Math.abs(y - n.offsetTop) > 0.5) n.style.top = y / H * 100 + "%";
+      });
+    };
+    new ResizeObserver(fit).observe(plot); requestAnimationFrame(fit); [0, 120, 400, 900].forEach(t => setTimeout(fit, t));
+    window.addEventListener("resize", fit);
     root.querySelectorAll(".bub").forEach(el => {
       el.ondragstart = e => e.preventDefault();
       el.onpointerdown = e => {
         if (e.button !== 0) return;
         e.preventDefault();
-        const sx = e.clientX, sy = e.clientY; let moved = false;
+        const W = plot.clientWidth, H = plot.clientHeight, pr = plot.getBoundingClientRect();
+        const bubs = [...root.querySelectorAll(".bub")].map(n => ({ n, id: n.dataset.id, x: n.offsetLeft, y: n.offsetTop, r: n.offsetWidth / 2 }));
+        bubs.forEach(o => { o.sx = o.x; o.sy = o.y; });
+        const d = bubs.find(o => o.n === el);
+        const ovl = (a, b) => a.r + b.r + GAP - Math.hypot(b.x - a.x, b.y - a.y);
+        /* le sovrapposizioni già presenti prima del drag (la tua analisi) restano com'erano */
+        const exempt = new Set();
+        bubs.forEach((a, i) => bubs.forEach((b, j) => { if (i < j && a !== d && b !== d && ovl(a, b) > 0) exempt.add(i + ":" + j); }));
+        const clamp = o => { o.x = Math.max(o.r, Math.min(W - o.r, o.x)); o.y = Math.max(o.r, Math.min(H - o.r, o.y)); };
+        const sep = (a, b, both) => {
+          let dx = b.x - a.x, dy = b.y - a.y, dist = Math.hypot(dx, dy);
+          const ov = a.r + b.r + GAP - dist; if (ov <= 0.01) return false;
+          if (dist < 0.01) { dx = 1; dy = 0; dist = 1; }
+          const ux = dx / dist, uy = dy / dist, k = both ? 0.5 : 1;
+          b.x += ux * ov * k; b.y += uy * ov * k; clamp(b);
+          if (both) { a.x -= ux * ov * k; a.y -= uy * ov * k; clamp(a); }
+          return true;
+        };
+        const step = (tx, ty) => {
+          const snap = bubs.map(o => [o.x, o.y]);
+          d.x = tx; d.y = ty; clamp(d);
+          for (let it = 0; it < 40; it++) {
+            let ch = false;
+            bubs.forEach(o => { if (o !== d && sep(d, o, false)) ch = true; });
+            bubs.forEach((a, i) => bubs.forEach((b, j) => { if (i < j && a !== d && b !== d && !exempt.has(i + ":" + j) && sep(a, b, true)) ch = true; }));
+            if (!ch) break;
+          }
+          const bad = bubs.some((a, i) => bubs.some((b, j) => i < j && (a === d || b === d || !exempt.has(i + ":" + j)) && ovl(a, b) > 1));
+          if (bad) { bubs.forEach((o, i) => { o.x = snap[i][0]; o.y = snap[i][1]; }); return; }
+          bubs.forEach(o => { o.n.style.left = o.x / W * 100 + "%"; o.n.style.top = o.y / H * 100 + "%"; });
+        };
+        const sx = e.clientX, sy = e.clientY, offX = d.x - (e.clientX - pr.left - plot.clientLeft), offY = d.y - (e.clientY - pr.top - plot.clientTop);
+        let moved = false;
         try { el.setPointerCapture(e.pointerId); } catch (_) {}
         el.classList.add("hold");
         const move = ev => {
           if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 4) return;
           moved = true;
-          const r = plot.getBoundingClientRect();
-          const x = Math.max(0, Math.min(100, (ev.clientX - r.left) / r.width * 100));
-          const y = Math.max(0, Math.min(100, (ev.clientY - r.top) / r.height * 100));
-          el.style.left = x + "%"; el.style.top = y + "%"; el.dataset.x = x; el.dataset.y = y;
+          step(ev.clientX - pr.left - plot.clientLeft + offX, ev.clientY - pr.top - plot.clientTop + offY);
         };
         const up = async () => {
           window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up);
           el.classList.remove("hold");
-          const item = DB.assets.find(x => x.id === el.dataset.id);
-          if (!moved) return openForm("assets", item);
-          item.mx = +(+el.dataset.x).toFixed(1); item.my = +(+el.dataset.y).toFixed(1);
-          await api("PUT", `assets/${item.id}`, { mx: item.mx, my: item.my });
+          if (!moved) return openForm("assets", DB.assets.find(x => x.id === el.dataset.id));
+          await Promise.all(bubs.filter(o => Math.abs(o.x - o.sx) > 0.01 || Math.abs(o.y - o.sy) > 0.01).map(o => {
+            const item = DB.assets.find(x => x.id === o.id);
+            item.mx = +(o.x / W * 100).toFixed(2); item.my = +(o.y / H * 100).toFixed(2);
+            return api("PUT", `assets/${item.id}`, { mx: item.mx, my: item.my });
+          }));
         };
         window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
       };
@@ -283,7 +326,6 @@ const assetCard = a => `<div class="card tint c-${COLORS[a.bias] || "gray"}" dra
 const stockCard = s => `<div class="card" draggable="true" data-id="${s.id}">
   <div class="t"><span>${esc(s.ticker)}</span><span class="grow"></span>${tag(s.direction)}</div>
   ${s.company ? `<div class="muted small" style="margin:-4px 0 8px">${esc(s.company)}${s.sector ? " · " + esc(s.sector) : ""}</div>` : ""}
-  ${s.entry || s.target || s.stop ? `<div class="kv"><span>Entry</span><b>${esc(s.entry) || "—"}</b></div><div class="kv"><span>Target</span><b>${esc(s.target) || "—"}</b></div><div class="kv"><span>Stop</span><b>${esc(s.stop) || "—"}</b></div>` : ""}
   ${s.thesis ? `<div class="note">${esc(s.thesis)}</div>` : ""}</div>`;
 
 const gcard = t => `<div class="gcard" data-id="${t.id}"><div class="t"><span class="e">${esc(t.emoji)}</span>${esc(t.name)}</div>
@@ -351,10 +393,10 @@ const PAGES = {
   stocks() {
     const s = DB.stocks;
     const body = state.stocksView === "board" ? board("stocks", "status", STOCK_STATUS, s, stockCard)
-      : table("stocks", s, { fields: ["ticker", "sector", "direction", "status", "entry", "target", "stop", "thesis"] });
+      : table("stocks", s, { fields: ["ticker", "sector", "direction", "status", "thesis"] });
     return `
     <div class="callout"><div class="ic">📈</div><div><b>Stock Picking</b>
-      <p>La tua watchlist di azioni: tesi, livelli di entry, target e stop. Trascina le card tra Watchlist, Attivo e Chiuso.</p></div></div>
+      <p>La tua watchlist di azioni: tesi, settore e direzione. Trascina le card tra Watchlist, Attivo e Chiuso.</p></div></div>
     <div class="kpis">
       <div class="kpi"><div class="l">Totale</div><div class="v">${s.length}</div></div>
       <div class="kpi"><div class="l">Watchlist</div><div class="v">${s.filter(x => x.status === "Watchlist").length}</div></div>
